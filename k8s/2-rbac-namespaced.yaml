@@ -1,0 +1,73 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slice-manager-role
+  namespace: oai5g
+rules:
+
+  # ── Pods : lecture + exec + logs + port-forward ───────────────────────────
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+
+  - apiGroups: [""]
+    resources: ["pods/exec"]          # kubectl exec (wait_iface, mysql queries)
+    verbs: ["create"]
+
+  - apiGroups: [""]
+    resources: ["pods/log"]           # kubectl logs (wait_log)
+    verbs: ["get"]
+
+  - apiGroups: [""]
+    resources: ["pods/portforward"]   # kubectl port-forward mysql
+    verbs: ["create"]
+
+  # ── Services, ConfigMaps, Secrets ────────────────────────────────────────
+  # (Helm charts OAI créent ces ressources)
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "configmaps", "secrets",
+                "serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ── Deployments, ReplicaSets ──────────────────────────────────────────────
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ── Helm stocke ses releases comme des Secrets avec label owner=helm ──────
+  # → déjà couvert par secrets ci-dessus
+
+  # ── NetworkPolicies, ResourceQuotas (certains charts OAI) ─────────────────
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ── RBAC (certains charts créent des Roles/RoleBindings) ──────────────────
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ── HorizontalPodAutoscaler (charts OAI UPF/SMF) ─────────────────────────
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ── Multus / annotations réseau (OAI 5G utilise Multus pour N2/N3/N4/N6) ─
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources: ["network-attachment-definitions"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: slice-manager-rolebinding
+  namespace: oai5g
+subjects:
+  - kind: ServiceAccount
+    name: slice-manager
+    namespace: slicemanager
+roleRef:
+  kind: Role
+  name: slice-manager-role
+  apiGroup: rbac.authorization.k8s.io

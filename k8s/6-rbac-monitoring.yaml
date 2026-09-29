@@ -1,0 +1,28 @@
+---
+# Accès aux ConfigMaps du namespace monitoring (pour provisioner les dashboards Grafana)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slice-manager-monitoring-role
+  namespace: monitoring
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets", "pods", "pods/exec"]
+  verbs: ["get","list","create","update","patch","delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: slice-manager-monitoring-rb
+  namespace: monitoring
+subjects:
+- kind: ServiceAccount
+  name: slice-manager
+  # slice-manager's own ServiceAccount lives in "slicemanager" (see
+  # 1-serviceaccount.yaml), not "oai5g" -- this RoleBinding never actually
+  # granted anything until this was fixed.
+  namespace: slicemanager
+roleRef:
+  kind: Role
+  name: slice-manager-monitoring-role
+  apiGroup: rbac.authorization.k8s.io

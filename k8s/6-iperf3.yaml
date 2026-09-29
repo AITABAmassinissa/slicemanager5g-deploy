@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf-server-0
+  namespace: slicemanager
+  labels:
+    app: iperf-server
+spec:
+  restartPolicy: Never
+  containers:
+    - name: iperf3
+      image: networkstatic/iperf3
+      args: ["-s", "--forceflush"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf-server-1
+  namespace: slicemanager
+  labels:
+    app: iperf-server
+spec:
+  restartPolicy: Never
+  containers:
+    - name: iperf3
+      image: networkstatic/iperf3
+      args: ["-s", "--forceflush"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf-server-2
+  namespace: slicemanager
+  labels:
+    app: iperf-server
+spec:
+  restartPolicy: Never
+  containers:
+    - name: iperf3
+      image: networkstatic/iperf3
+      args: ["-s", "--forceflush"]

@@ -1,0 +1,147 @@
+# Remplace le lancement manuel de setup-host-net.sh sur chaque noeud (qui exigeait
+# sudo + un acces shell direct). Ce DaemonSet applique la meme config reseau hote
+# (bridges Multus br-n3/br-n6, passerelles N3/N6 macvlan, NAT, forwarding) sur TOUS
+# les noeuds du cluster automatiquement, sans SSH -- le conteneur tourne en
+# hostNetwork + privileged, donc ses commandes ip/iptables/nmcli s'appliquent
+# directement a l'hote, exactement comme le fait le DaemonSet flannel.
+#
+# Comme tout DaemonSet, Kubernetes le programme automatiquement sur chaque
+# nouveau noeud qui rejoint le cluster -- pas d'action manuelle a l'ajout d'un
+# noeud. Et comme kubelet relance le pod apres un reboot du noeud, la config
+# reseau se reapplique toute seule.
+#
+# Repris de setup-host-net.sh (voir ce fichier pour l'explication complete des
+# deux causes racines trouvees en debogage) avec deux differences :
+#   1. Le "_nm_unmanage" (nmcli) est conserve ici -- NetworkManager "adopte" ces
+#      interfaces des qu'il les voit et fige une IP perimee dedans a chaque
+#      reboot si on ne l'en empeche pas explicitement (voir setup-host-net.sh).
+#   2. Pas de routes de retour par slice ici : elles sont gerees dynamiquement,
+#      par slice, par ensure_host_route() dans scripts/oai_deploy_slice.py au
+#      moment du deploiement -- un DaemonSet statique ne peut pas les connaitre.
+#   3. La boucle re-applique la config toutes les 30s (au lieu d'un "sleep
+#      infinity" apres un seul passage) : si NetworkManager reprend la main sur
+#      une interface plus tard (scan retarde, etc.), le DaemonSet la recorrige
+#      de lui-meme sans intervention.
+#
+# kubectl apply -f k8s/10-host-net-setup.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: host-net-setup
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: host-net-setup-script
+  namespace: host-net-setup
+data:
+  setup.sh: |
+    #!/bin/bash
+
+    _nm_unmanage() {
+      command -v nmcli >/dev/null 2>&1 || return 0
+      nmcli connection delete "$1" >/dev/null 2>&1 || true
+      nmcli device set "$1" managed no >/dev/null 2>&1 || true
+    }
+
+    apply_once() {
+      set -e
+
+      EXT_IF="$(ip route get 8.8.8.8 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
+      if [ -z "$EXT_IF" ] || ! ip link show "$EXT_IF" >/dev/null 2>&1; then
+        echo "[$(hostname)] Impossible de detecter l'interface Internet, abandon de ce passage." >&2
+        return 1
+      fi
+
+      for b in n3 n6; do
+        ip link show br-$b >/dev/null 2>&1 || ip link add br-$b type bridge
+        _nm_unmanage br-$b
+        ip link set br-$b up
+      done
+
+      for b in n3 n6; do
+        ip link show dum-$b >/dev/null 2>&1 || ip link add dum-$b type dummy
+        _nm_unmanage dum-$b
+        ip link set dum-$b master br-$b
+        ip link set dum-$b up
+      done
+
+      # La passerelle N6 ne doit vivre QUE sur mv-n6 (l'enfant macvlan), jamais
+      # aussi sur br-n6 -- sinon la resolution ARP du noyau est non-deterministe
+      # entre les deux interfaces qui partageraient la meme adresse.
+      ip addr del 10.100.6.1/24 dev br-n6 2>/dev/null || true
+      ip link show mv-n6 >/dev/null 2>&1 || ip link add mv-n6 link br-n6 type macvlan mode bridge
+      _nm_unmanage mv-n6
+      ip addr add 10.100.6.1/24 dev mv-n6 2>/dev/null || true
+      ip link set mv-n6 up
+
+      # Meme chose pour N3 (mv-n3) : necessaire uniquement pour l'UPF classique,
+      # qui n'a pas d'attache N3 dediee et doit atteindre le gNB (10.100.3.x)
+      # via l'hote -- VPP-UPF/gNB n'en ont pas besoin (macvlan-a-macvlan direct
+      # sur br-n3). Sans ca, l'hote lui-meme ne peut pas resoudre l'ARP du gNB
+      # ("Destination Host Unreachable" confirme en test), et le downlink de
+      # tout slice en UPF classique echoue silencieusement.
+      ip addr del 10.100.3.1/24 dev br-n3 2>/dev/null || true
+      ip link show mv-n3 >/dev/null 2>&1 || ip link add mv-n3 link br-n3 type macvlan mode bridge
+      _nm_unmanage mv-n3
+      ip addr add 10.100.3.1/24 dev mv-n3 2>/dev/null || true
+      ip link set mv-n3 up
+
+      iptables -t nat -C POSTROUTING -s 12.1.0.0/16 -o "$EXT_IF" -j MASQUERADE 2>/dev/null \
+        || iptables -t nat -A POSTROUTING -s 12.1.0.0/16 -o "$EXT_IF" -j MASQUERADE
+      iptables -C FORWARD -i mv-n6 -o "$EXT_IF" -j ACCEPT 2>/dev/null \
+        || iptables -I FORWARD -i mv-n6 -o "$EXT_IF" -j ACCEPT
+      iptables -C FORWARD -i "$EXT_IF" -o mv-n6 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+        || iptables -I FORWARD -i "$EXT_IF" -o mv-n6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+      sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+      echo "[$(hostname)] OK - config reseau hote en place (EXT_IF=$EXT_IF)"
+    }
+
+    while true; do
+      apply_once || echo "[$(hostname)] passage echoue, nouvelle tentative dans 30s" >&2
+      sleep 30
+    done
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: host-net-setup
+  namespace: host-net-setup
+spec:
+  selector:
+    matchLabels:
+      app: host-net-setup
+  template:
+    metadata:
+      labels:
+        app: host-net-setup
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+        - operator: Exists   # tourne aussi sur le control-plane et des noeuds "tainted"
+      containers:
+        - name: host-net-setup
+          image: nicolaka/netshoot:latest
+          command: ["/bin/bash", "/script/setup.sh"]
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: script
+              mountPath: /script
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: script
+          configMap:
+            name: host-net-setup-script
+            defaultMode: 0755

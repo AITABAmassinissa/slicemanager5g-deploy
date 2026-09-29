@@ -1,0 +1,35 @@
+# ── PersistentVolume ─────────────────────────────────────────────────────────
+# Stockage local sur le nœud — persiste entre redémarrages pod.
+# Le binding est forcé via claimRef pour éviter tout conflit.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: slice-manager-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""              # ← storage class vide = lié uniquement par claimRef
+  claimRef:                         # ← binding forcé sur ce PVC exact
+    namespace: slicemanager
+    name: slice-manager-pvc
+  hostPath:
+    path: /opt/slice-manager-workspace
+    type: DirectoryOrCreate
+---
+# ── PersistentVolumeClaim ────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slice-manager-pvc
+  namespace: slicemanager
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: ""              # ← doit correspondre au PV (vide = manuel)
+  volumeName: slice-manager-pv     # ← binding explicite au PV

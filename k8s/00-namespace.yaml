@@ -1,0 +1,7 @@
+# Namespace dedie au slice manager lui-meme.
+# Les workloads (coeur 5G, gNB, slices) vont dans le namespace choisi dans l'UI,
+# par defaut celui de la variable NAMESPACE du deployment.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: slicemanager

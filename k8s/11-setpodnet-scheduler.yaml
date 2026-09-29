@@ -1,0 +1,144 @@
+# Third-party custom scheduler used to co-schedule a slice's upf/smf/gnbanchor
+# pods together (see its own README for why: they must land as a group for its
+# placement logic). Source: https://github.com/AIDY-F2N/setpodnet-scheduler
+# Vendored here (unmodified) so slice-manager's own startup can redeploy it
+# automatically -- it lives in kube-system, which kubeadm/cluster resets wipe,
+# so it must be reapplied after every fresh cluster bring-up, same as
+# 10-host-net-setup.yaml. Without it, every slice's upf/smf/gnbanchor pods stay
+# stuck Pending forever (schedulerName: setpodnet-scheduler, no such scheduler
+# running) -- confirmed in test after a full machine/cluster reset.
+#
+# kubectl apply -f k8s/11-setpodnet-scheduler.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: setpodnet-scheduler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: namespace-creator
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["create","delete"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["create","delete"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get","list"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["patch"]
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: namespace-creator-binding
+subjects:
+- kind: ServiceAccount
+  name: setpodnet-scheduler
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: namespace-creator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: setpodnet-scheduler-as-kube-scheduler
+subjects:
+- kind: ServiceAccount
+  name: setpodnet-scheduler
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: system:kube-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: qperf
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: qperf
+  name: qperf-creator
+rules:
+- apiGroups: ["apps"]
+  resources: ["daemonsets"]
+  verbs: ["create","delete"]
+- apiGroups: ["apps"]
+  resources: ["daemonsets/status"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/exec","pods"]
+  verbs: ["get","list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qperf-creator-binding
+  namespace: qperf
+subjects:
+- kind: ServiceAccount
+  name: setpodnet-scheduler
+  namespace: kube-system
+roleRef:
+  kind: Role
+  name: qperf-creator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    component: scheduler
+    tier: control-plane
+  name: setpodnet-scheduler
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: scheduler
+      tier: control-plane
+  template:
+    metadata:
+      labels:
+        component: scheduler
+        tier: control-plane
+    spec:
+      serviceAccountName: setpodnet-scheduler
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+      containers:
+      - image: docker.io/maitaba/setpodnet:v1.0
+        name: setpodnet-scheduler
+        imagePullPolicy: Always

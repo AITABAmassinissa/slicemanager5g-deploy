@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slice-manager
+  namespace: slicemanager
+  labels:
+    app: slice-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slice-manager
+  template:
+    metadata:
+      labels:
+        app: slice-manager
+    spec:
+      serviceAccountName: slice-manager
+      nodeSelector:
+        slice-manager/workspace: "true"
+
+      initContainers:
+        - name: init-workspace
+          image: busybox:1.36
+          command: ["sh","-c","mkdir -p /workspace/oai-5g-ran && echo OK"]
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+
+      containers:
+        - name: slice-manager
+          image: maitaba/slicemanager5g:v1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/app/startup.sh"]
+
+          env:
+            - name: NAMESPACE
+              value: "oai5g"
+            - name: SM_NAMESPACE
+              value: "slicemanager"
+            - name: WORKSPACE
+              value: "/workspace"
+            - name: DB_USER
+              value: "root"
+            - name: DB_PASSWORD
+              value: "linux"
+            - name: DB_NAME
+              value: "oai_db"
+            - name: MYSQL_PORT
+              value: "3306"
+            - name: MYSQL_PF_PORT
+              value: "3307"
+            - name: API_PORT
+              value: "8080"
+            - name: OLLAMA_URL
+              value: "http://ollama:11434"
+            - name: OLLAMA_MODEL
+              value: "qwen2.5:1.5b"
+
+          ports:
+            - name: web
+              containerPort: 8080
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"      # 2 vCPUs
+              memory: "2Gi"     # 2 GB RAM
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /api/nodes
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: slice-manager-pvc

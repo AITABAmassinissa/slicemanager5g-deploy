@@ -1,0 +1,159 @@
+# Permissions cluster-wide nécessaires pour helm et kubectl
+# (lecture des nodes, namespaces, StorageClasses)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: slice-manager-cluster-role
+rules:
+  # Lecture des nodes (helm dependency)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # Namespaces : "create" est requis pour deployer le coeur (ou les slices)
+  # dans un namespace choisi depuis l'UI et cree a la volee. "delete" est
+  # requis pour que startup.sh puisse (re)creer le ClusterRole
+  # "namespace-creator" de setpodnet-scheduler.yaml (regle anti-escalade RBAC
+  # de Kubernetes : impossible de creer un role qui accorde des droits qu'on
+  # ne detient pas deja soi-meme).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+  # PersistentVolumes : meme raison que ci-dessus, pour le ClusterRole
+  # "namespace-creator" de setpodnet-scheduler.yaml.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "patch"]
+
+  # Lecture des services cluster-wide : detection du NodePort Grafana
+  # (Video Test / Monitoring scannent les services pour trouver grafana)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+
+  # StorageClass (certains charts PVC)
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # Accès aux CustomResourceDefinitions (Multus, OAI operators éventuels)
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+
+  # Nécessaire pour que helm discover les API disponibles
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "list", "watch"]
+
+  # ── Workloads cluster-wide ─────────────────────────────────────────────
+  # Le Role namespace (2-rbac-namespaced.yaml) ne couvre que oai5g. Pour
+  # deployer le coeur, les gNB ou les slices dans un namespace choisi dans
+  # l'UI, les memes droits sont necessaires dans n'importe quel namespace.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    # "get"/"list" en plus de "create" : requis pour que startup.sh puisse
+    # (re)creer le Role "qperf-creator" de setpodnet-scheduler.yaml (meme
+    # regle anti-escalade RBAC que ci-dessus).
+    verbs: ["get", "list", "create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "configmaps", "secrets",
+                "serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # daemonsets/status : requis pour que startup.sh puisse (re)creer le Role
+  # "qperf-creator" de setpodnet-scheduler.yaml (meme regle anti-escalade).
+  - apiGroups: ["apps"]
+    resources: ["daemonsets/status"]
+    verbs: ["get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # ClusterRole/ClusterRoleBinding : requis pour que startup.sh reapplique
+  # automatiquement setpodnet-scheduler.yaml (kube-system), qui en cree
+  # plusieurs (le scheduler tiers lui-meme + le binding "namespace-creator").
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources: ["network-attachment-definitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: slice-manager-cluster-rolebinding
+subjects:
+  - kind: ServiceAccount
+    name: slice-manager
+    namespace: slicemanager
+roleRef:
+  kind: ClusterRole
+  name: slice-manager-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Kubernetes refuses to let a ServiceAccount CREATE a Role/ClusterRole that
+# grants permissions the creator doesn't itself hold ("privilege escalation
+# prevention") -- confirmed in test: startup.sh's own `kubectl apply -f
+# 11-setpodnet-scheduler.yaml` was rejected outright (Forbidden) on its
+# ClusterRole/ClusterRoleBinding/Role, because setpodnet-scheduler needs
+# genuine kube-scheduler-level permissions (pods/binding, leases, events,
+# ...) that slice-manager-cluster-role above doesn't grant. Binding to the
+# cluster's own built-in "system:kube-scheduler" ClusterRole gives exactly
+# that permission set (correct and complete by construction, no need to
+# hand-copy/maintain the list here) so slice-manager's own ServiceAccount is
+# allowed to create the third-party scheduler's RBAC objects on its behalf.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: slice-manager-as-kube-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: slice-manager
+    namespace: slicemanager
+roleRef:
+  kind: ClusterRole
+  name: system:kube-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+# Same escalation-prevention wall, much bigger this time: the monitoring
+# stack (kube-prometheus-stack) install fails outright otherwise --
+# confirmed in test: "customresourcedefinitions ... is forbidden" trying to
+# install its own CRDs (Prometheus/Alertmanager/...), and that's only the
+# first of many -- its sub-charts (prometheus-operator, kube-state-metrics,
+# node-exporter, grafana) each create their own ClusterRoles needing broad,
+# ever-changing cluster-read access (nodes, pods, endpoints, ...) to scrape
+# metrics. Enumerating and maintaining that exact permission set by hand is
+# impractical and would break on the chart's next version bump. Binding
+# straight to cluster-admin is the explicit, deliberate tradeoff made for
+# this single-operator dev/test lab, where slice-manager already has
+# near-total cluster control via the bindings above anyway -- confirmed
+# with the user before adding this.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: slice-manager-cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: slice-manager
+    namespace: slicemanager
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
